@@ -5,6 +5,7 @@ from astropy.convolution import Gaussian2DKernel
 from astropy.stats import gaussian_fwhm_to_sigma
 #from astropy.coordinates import SkyCoord
 from photutils.background import Background2D
+from photutils.detection import DAOStarFinder
 from astropy.convolution import convolve, Gaussian2DKernel, Tophat2DKernel
 from photutils.segmentation import detect_sources, deblend_sources, SourceCatalog
 from scipy import ndimage
@@ -12,6 +13,8 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import h5py
 import pandas as pd
+from astropy.table import QTable
+from matplotlib.colors import LogNorm
 
 #------------------------------------------------------------------------------
 # Main procedures
@@ -56,50 +59,61 @@ def process_images(detection_image, filter_images, nsigma, npixels, nlevels=32, 
         photo = f.create_group('Photo')
         detection_img = photo.create_group('Detection_Image')
         detection_img_name = detection_img.create_group(detection_image.img_name)
-
-        detection_image.detect_sources(nsigma, npixels, nlevels, connectivity, contrast, mode, smooth_data, kernel_name, smooth_fwhm, kernel_size, progress_bar, show_plots)
+        detection_image.detect_sources(nsigma, npixels, nlevels, connectivity, contrast, mode, smooth_data, kernel_name, smooth_fwhm, kernel_size, None, progress_bar, show_plots)    
         detection_image.initialize_photometry(detection_image, apermask_method, kron_params)
         detection_image.perform_circular_aperture_photometry(radius)
         detection_image.perform_kron_photometry(kron_params)
-        detection_image_dataframe, columns = detection_image.to_dataframe(columns=columns, save_to_file=False)
-
-        # aper = detection_img_name.create_dataset('aper', data=detection_image_dataframe['aperture_phot_flux'])
-        # aper_err = detection_img_name.create_dataset('aper_err', data=detection_image_dataframe['aperture_phot_fluxerr'])
-        # kron = detection_img_name.create_dataset('kron', data=detection_image_dataframe['kron_phot_flux'])
-        # kron_err = detection_img_name.create_dataset('kron_err', data=detection_image_dataframe['kron_phot_fluxerr'])
+        detection_image_table, columns_list = detection_image.to_table(columns=columns, save_to_file=False)
+        detection_image_dataframe = detection_image.table_to_dataframe(detection_image_table, save_to_file=False)
         
-        for i in columns:
+        for i in columns_list:
             column_name = detection_img_name.create_dataset(i, data=detection_image_dataframe[i])
 
         # Filter images handling
+        if filter_images is None:
+            pass
+        else:
+            filter_images_group = photo.create_group('Filter_Images')
         
-        filter_images_group = photo.create_group('Filter_Images')
-        
-        if isinstance(filter_images, tuple):
-            filter_images = list(filter_images)
-        elif not isinstance(filter_images, list):
-            filter_images = [filter_images]
+            if isinstance(filter_images, tuple):
+                filter_images = list(filter_images)
+            elif not isinstance(filter_images, list):
+                filter_images = [filter_images]
                    
-        for i, filter_image in enumerate(filter_images, start=1):
-            print('Filter Image', i, 'processing')
+            for i, filter_image in enumerate(filter_images, start=1):
+                print('Filter Image', i, 'processing')
             
-            filter_image_name = filter_images_group.create_group(filter_image.img_name)
+                filter_image_name = filter_images_group.create_group(filter_image.img_name)
             
-            filter_image.initialize_photometry(detection_image, apermask_method, kron_params)
-            filter_image.perform_circular_aperture_photometry(radius)
-            filter_image.perform_kron_photometry(kron_params)
-            filter_image_dataframe, columns = filter_image.to_dataframe(columns=columns, save_to_file=False)
+                filter_image.initialize_photometry(detection_image, apermask_method, kron_params)
+                filter_image.perform_circular_aperture_photometry(radius)
+                filter_image.perform_kron_photometry(kron_params)
+                filter_image_table, columns_list = filter_image.to_table(columns=columns, save_to_file=False)
+                filter_image_dataframe = filter_image.table_to_dataframe(filter_image_table, save_to_file=False)
             
-            for i in columns:
-                column_name = filter_image_name.create_dataset(i, data=filter_image_dataframe[i])
+                for i in columns_list:
+                    column_name = filter_image_name.create_dataset(i, data=filter_image_dataframe[i])
 
+def make_cutout(image, x, y, width, extensions = ['sci', 'err', 'wht', 'bkg', 'bkg_rms'], cutout_img_name='cutout_image'):
+        return image.cutout(x, y, width, extensions, cutout_img_name)
+    
+def make_img_panel(image, vmin=None, vmax=None, scaling=False, cmap=cm.magma):
+        fig, ax = plt.subplots()
+        image.img_panel(ax, image.sci, vmin, vmax, scaling, cmap)
+        plt.show()
+        
+def make_significance_panel(image, threshold = 2.5, background_substracted = True):
+        fig, ax = plt.subplots()
+        image.significance_panel(ax, threshold, background_substracted)
+        plt.show()
+    
 #------------------------------------------------------------------------------
 # Supporting functions
 #------------------------------------------------------------------------------
 
 class Image:
-    
-    def detect_sources(self, nsigma, npixels, nlevels=32, connectivity=8, contrast=0.0001, mode='exponential', smooth_data=True, kernel_name='Tophat', smooth_fwhm=2, kernel_size=5, progress_bar=True, show_plots=True):
+        
+    def detect_sources(self, nsigma, npixels, nlevels=32, connectivity=8, contrast=0.0001, mode='exponential', smooth_data=True, kernel_name='Tophat', smooth_fwhm=2, kernel_size=5, segm_map=None, progress_bar=True, show_plots=True):
         """
         Creates a deblended segmentation image.
 
@@ -135,21 +149,26 @@ class Image:
         elif smooth_data is False:
             pass
         
-        # Detect sources with npixels connected pixels at/above threshold in data smoothed by kernel
-        # https://photutils.readthedocs.io/en/stable/segmentation.html
-        self.segm_detect = detect_sources(data=self.sci, threshold=detection_threshold, npixels=npixels, connectivity=connectivity)
+        if segm_map is None:
+            # Detect sources with npixels connected pixels at/above threshold in data smoothed by kernel
+            # https://photutils.readthedocs.io/en/stable/segmentation.html
+            self.segm_detect = detect_sources(data=self.sci, threshold=detection_threshold, npixels=npixels, connectivity=connectivity)
+        
+        else:
+            self.segm_detect = segm_map
         
         # Deblend: separate connected/overlapping sources
         # https://photutils.readthedocs.io/en/stable/segmentation.html#source-deblending
         self.segm_deblend = deblend_sources(data=self.sci, segment_img=self.segm_detect, npixels=npixels, nlevels=nlevels, contrast=contrast, mode=mode, connectivity=connectivity, progress_bar=progress_bar)
         
         if show_plots is True:
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+            fig1, ax1 = plt.subplots(figsize=(10, 10))
             ax1.imshow(self.segm_detect, origin='lower', cmap=self.segm_detect.cmap, interpolation='nearest')
             ax1.set_title('Segmentation Image')
+            fig2, ax2 = plt.subplots(figsize=(10, 10))
             ax2.imshow(self.segm_deblend, origin='lower', cmap=self.segm_deblend.cmap, interpolation='nearest')
             ax2.set_title('Deblended Segmentation Image')
-            plt.tight_layout()
+            plt.show()
         
     def initialize_photometry(self, detection_image, apermask_method='correct', kron_params=[1.1, 1.6]):
         """
@@ -256,7 +275,7 @@ class Image:
         self.background_map = Background2D(self.sci, bkg_size, filter_size=filter_size)
         self.bkg = self.background_map.background
         self.bkg_rms = self.background_map.background_rms
-        
+    
     def to_table(self, columns=None, save_to_file=True, filename='output_file.h5', format='hdf5'):
         
         """
@@ -277,52 +296,106 @@ class Image:
         """
         
         if columns is None:
-            columns=set()
-        else:
-            columns = set(columns)
-        
-        columns.update([self.aper_name + '_flux', self.aper_name + '_fluxerr', self.kron_name + '_flux', self.kron_name + '_fluxerr'])
-              
-        self.photometry_table = self.photometry_cat.to_table(list(columns))
+            columns=[]
+        elif isinstance(columns, tuple):
+            columns = list(columns)
+        elif not isinstance(columns, list):
+            columns = [columns]
+        columns_list = columns + [self.aper_name + '_flux', self.aper_name + '_fluxerr', self.kron_name + '_flux', self.kron_name + '_fluxerr', 'xcentroid', 'ycentroid']
+        self.photometry_table = self.photometry_cat.to_table(columns_list)
         
         if save_to_file is True :
             self.photometry_table.write(filename, path = 'data', format=format, overwrite=True)
             
-        return self.photometry_table, columns
+        return self.photometry_table, columns_list
         
-    def to_dataframe(self, columns=None, save_to_file=True, filename='output_file.csv', format='csv'):
+    def table_to_dataframe(self, input_table, save_to_file=True, filename='output_file.csv', format='csv'):
         
-        """
-        Convert photometry catalog to a Pandas Dataframe and optionally save it to a file.
-
-        Parameters :
-        - columns : List of column names to include in the dataframe. Default : None, however the circular aperture and kron photometry columns are added automatically and don't have to be provided.
-        - save_to_file : Boolean, whether to save the dataframe to a file. Default : True
-        - filename : Name of the file to save the table (if save_to_file is True). Default : 'output_file.csv'
-        - format : Format of the file if saving to a file. Default : 'csv'
-
-        Returns :
-        - photometry_dataframe : The resulting Pandas Dataframe.
-        - columns : The set of column names
-        
-        Documentation :
-        - https://photutils.readthedocs.io/en/stable/api/photutils.segmentation.SourceCatalog.html#photutils.segmentation.SourceCatalog.to_table
-        """
-        
-        if columns is None:
-            columns=set()
-        else:
-            columns = set(columns)
-        
-        columns.update([self.aper_name + '_flux', self.aper_name + '_fluxerr', self.kron_name + '_flux', self.kron_name + '_fluxerr'])
-
-        self.photometry_table = self.photometry_cat.to_table(list(columns))
-        self.photometry_dataframe = self.photometry_table.to_pandas()
+        self.photometry_dataframe = input_table.to_pandas()
         
         if save_to_file is True:
             self.photometry_dataframe.to_csv(filename, index=False, mode='w')
             
-        return self.photometry_dataframe, columns
+        return self.photometry_dataframe
+
+    
+    def cutout(self, x, y, width, extensions = ['sci', 'err', 'wht', 'bkg', 'bkg_rms'], img_name = 'cutout_image'):
+        
+        """extract cut out"""
+
+        if 'err' in extensions: err = np.zeros((width, width))
+        if 'sci' in extensions: data = np.zeros((width, width))
+        if 'wht' in extensions: wht = np.zeros((width, width))
+        if 'bkg' in extensions: bkg = np.zeros((width, width))
+        if 'bkg_rms' in extensions: bkg_rms = np.zeros((width, width))
+
+        x = int(np.round(x, 0))
+        y = int(np.round(y, 0))
+
+        xmin = x - width // 2
+        xmax = x + width // 2
+        ymin = y - width // 2
+        ymax = y + width // 2
+
+        xstart = 0
+        ystart = 0
+        xend = width
+        yend = width
+
+        if xmin < 0:
+            xstart = -xmin
+            xmin = 0
+        if ymin < 0:
+            ystart = -ymin
+            ymin = 0
+        if xmax > self.sci.shape[0]:
+            xend -= xmax - self.sci.shape[0]
+            xmax = self.sci.shape[0]
+        if ymax > self.sci.shape[1]:
+            yend -= ymax - self.sci.shape[1]
+            ymax = self.sci.shape[1]
+
+        if (width % 2) != 0:
+            xmax += 1
+            ymax += 1
+        
+        data[xstart:xend,ystart:yend] = self.sci[xmin:xmax,ymin:ymax]
+        data[xstart:xend,ystart:yend] = self.sci_initial[xmin:xmax,ymin:ymax]
+        if 'err' in extensions: err[xstart:xend,ystart:yend] = self.err[xmin:xmax,ymin:ymax]
+        if 'wht' in extensions: wht[xstart:xend,ystart:yend] = self.wht[xmin:xmax,ymin:ymax]
+        if 'bkg' in extensions: bkg[xstart:xend,ystart:yend] = self.bkg[xmin:xmax,ymin:ymax]
+        if 'bkg_rms' in extensions: bkg_rms[xstart:xend,ystart:yend] = self.bkg_rms[xmin:xmax,ymin:ymax]
+        
+        return ImageFromArrays(data, img_name, err = err, wht = wht, bkg = bkg, bkg_rms = bkg_rms)
+
+    def img_panel(self, ax, im, vmin=None, vmax=None, scaling=False, cmap=cm.magma):
+        
+        if vmin is None:
+            vmin = np.min(im)
+        if vmax is None:
+            vmax = np.max(im)
+
+        if scaling:
+            im = scaling(im)
+
+        ax.axis('off')
+        ax.imshow(im, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower')  # choose better scaling
+        
+        return ax
+    
+    def significance_panel(self, ax, threshold = 2.5, background_substracted = True):
+    
+        if background_substracted is True:
+            sig = (self.sci)/self.err
+            
+        if background_substracted is False:
+            sig = (self.sci-self.bkg)/self.bkg_rms
+
+        ax.imshow(sig, cmap = cm.Greys, vmin = -threshold*2, vmax = threshold*2, origin = 'lower', interpolation = 'none')
+        ax.imshow(np.ma.masked_where(sig <= threshold, sig), cmap = cm.plasma, vmin = threshold, vmax = 100, origin = 'lower', interpolation = 'none')
+        ax.set_axis_off()
+
+        return ax
 
 #------------------------------------------------------------------------------
 # Image initializing
@@ -409,7 +482,6 @@ class ImageFromDifferentSources(Image):
                 self.bkg_rms = np.empty(self.sci.shape)
             if self.background_substracted is False:
                 self.measure_background_map(bkg_size, filter_size)
-                
                 
                 
 #implement star detection
