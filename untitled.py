@@ -2,30 +2,52 @@
 # Imports
 #------------------------------------------------------------------------------
 
-
+import numpy as np
+from astropy.io import fits
+import astropy.wcs as wcs
+from astropy.stats import gaussian_fwhm_to_sigma
+from astropy.stats import SigmaClip
+from astropy.convolution import convolve, Gaussian2DKernel, Tophat2DKernel
+#from astropy.coordinates import SkyCoord
+from photutils.background import SExtractorBackground, StdBackgroundRMS, BkgZoomInterpolator
+from photutils.segmentation import detect_sources, deblend_sources, detect_threshold, SourceCatalog
+import statmorph
+from scipy import ndimage
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 
 #------------------------------------------------------------------------------
 # Main procedures
 #------------------------------------------------------------------------------
 
-def process_images_morphology(image, nsigma, npixels, nlevels, contrast, weightmap, bkg_error, gain=None, background=0.0, labels=None, connectivity=8, mode='exponential', mask='None', sigma_clip=SigmaClip(sigma=3.0, sigma_lower=3.0, sigma_upper=3.0, maxiters=10, cenfunc='median', stdfunc='std', grow=False), relabel=True, nproc=1, progress_bar=True):
+def process_images_morphology(image, data, nsigma, npixels, nlevels, contrast, weightmap, bkg_error, gain=None, background=0.0, labels=None, connectivity=8, mode='exponential', mask='None', sigma_clip=SigmaClip(sigma=3.0, sigma_lower=3.0, sigma_upper=3.0, maxiters=10, cenfunc='median', stdfunc='std', grow=False), smooth_data=True, kernel_name='Tophat', smooth_fwhm=3, kernel_size=5, relabel=True, nproc=1, progress_bar=True):
     
-    segment_img = detect_sources(image, nsigma, npixels, connectivity, mask, background, bkg_error, sigma_clip)
-    deblend_img = deblend_sources(image, segment_img, nlevels, contrast, npixels, labels, mode, connectivity, relabel, nproc, progress_bar)
-    morphologies = morphology(image, deblend_img, weightmap, gain)
+    segment_img = image.source_detection(data, nsigma, npixels, connectivity, mask, background, bkg_error, sigma_clip, smooth_data, kernel_name, smooth_fwhm, kernel_size)
+    deblend_img = image.source_deblending(data, segment_img, nlevels, contrast, npixels, labels, mode, connectivity, relabel, nproc, progress_bar)
+    morphologies = image.morphology(image, deblend_img, weightmap, gain)
     
-def process_images_photometry(image, nsigma, npixels, nlevels, contrast, bkg_error, tot_error, background=0.0, presub_background='None', labels=None, connectivity=8, mode='exponential', mask='None', local_bkg_width=0, apermask_method='correct', sigma_clip=SigmaClip(sigma=3.0, sigma_lower=3.0, sigma_upper=3.0, maxiters=10, cenfunc='median', stdfunc='std', grow=False), relabel=True, wcs='None', nproc=1, progress_bar=True):
+def process_images_photometry(image, data, nsigma, npixels, nlevels, contrast, kron_params, bkg_error, tot_error, background=0.0, presub_background='None', labels=None, connectivity=8, mode='exponential', mask='None', local_bkg_width=0, apermask_method='correct', sigma_clip=SigmaClip(sigma=3.0, sigma_lower=3.0, sigma_upper=3.0, maxiters=10, cenfunc='median', stdfunc='std', grow=False), smooth_data=True, kernel_name='Tophat', smooth_fwhm=3, kernel_size=5, relabel=True, wcs='None', nproc=1, progress_bar=True):
     
-    segment_img = detect_sources(image, nsigma, npixels, connectivity, mask, background, bkg_error, sigma_clip)
-    deblend_img = deblend_sources(image, segment_img, nlevels, contrast, npixels, labels, mode, connectivity, relabel, nproc, progress_bar)
-    detection_cat = photometry(self.sci, deblend_img, self.convolved_data, tot_error, mask, presub_background, wcs, local_bkg_width, apermask_method, kron_params, 'None', progress_bar)
-    photometry_cat = photometry(self.sci, deblend_img, self.convolved_data, tot_error, mask, presub_background, wcs, local_bkg_width, apermask_method, kron_params, detection_cat, progress_bar)
+    segment_img = image.source_detection(data, nsigma, npixels, connectivity, mask, background, bkg_error, sigma_clip, smooth_data, kernel_name, smooth_fwhm, kernel_size)
+    deblend_img = image.source_deblending(data, segment_img, nlevels, contrast, npixels, labels, mode, connectivity, relabel, nproc, progress_bar)
+    
+    if smooth_data==True:
+        convolved_data = image.convolved_data
+    elif smooth_data==False:
+        convolved_data=None
+    else:
+        raise ValueError('invalid value given to "smooth_data"')
 
-def process_images_number_counts(image, nsigma, npixels, nlevels, contrast, weightmap, bkg_error, gain=None, background=0.0, labels=None, connectivity=8, mode='exponential', mask='None', sigma_clip=SigmaClip(sigma=3.0, sigma_lower=3.0, sigma_upper=3.0, maxiters=10, cenfunc='median', stdfunc='std', grow=False), relabel=True, nproc=1, progress_bar=True):
-    
-    segment_img = detect_sources(image, nsigma, npixels, connectivity, mask, background, bkg_error, sigma_clip)
-    deblend_img = deblend_sources(image, segment_img, nlevels, contrast, npixels, labels, mode, connectivity, relabel, nproc, progress_bar)
+    detection_cat = image.photometry(data, deblend_img, convolved_data, tot_error, mask, presub_background, wcs, local_bkg_width, apermask_method, kron_params, 'None', progress_bar)
+    photometry_cat = image.photometry(data, deblend_img, convolved_data, tot_error, mask, presub_background, wcs, local_bkg_width, apermask_method, kron_params, detection_cat, progress_bar)
 
+def process_images_number_counts(image, data, nsigma, npixels, nlevels, contrast, weightmap, bkg_error, gain=None, background=0.0, labels=None, connectivity=8, mode='exponential', mask='None', sigma_clip=SigmaClip(sigma=3.0, sigma_lower=3.0, sigma_upper=3.0, maxiters=10, cenfunc='median', stdfunc='std', grow=False), smooth_data=True, kernel_name='Tophat', smooth_fwhm=3, kernel_size=5, relabel=True, nproc=1, progress_bar=True):
+    
+    segment_img = image.source_detection(data, nsigma, npixels, connectivity, mask, background, bkg_error, sigma_clip, smooth_data, kernel_name, smooth_fwhm, kernel_size)
+    deblend_img = image.source_deblending(data, segment_img, nlevels, contrast, npixels, labels, mode, connectivity, relabel, nproc, progress_bar)
+
+    return len(deblend_img.labels)
+    
 def make_cutout(image, x=None, y=None, width=None, height=None, xmin=None, xmax=None, ymin=None, ymax=None, extensions = ['sci', 'err', 'wht', 'bkg', 'bkg_rms'], cutout_img_name='cutout_image'):
         
     return image.cutout(x, y, width, height, xmin, xmax, ymin, ymax, extensions, cutout_img_name)
@@ -46,26 +68,150 @@ def make_significance_panel(image, threshold = 2.5, background_substracted = Tru
 # Supporting functions
 #------------------------------------------------------------------------------
 
-def detect_sources():
-    q
+class Image:
 
-def deblend_sources():
-    q
+    def source_detection(self, data, nsigma, npixels, connectivity, mask, background, bkg_error, sigma_clip, smooth_data, kernel_name, smooth_fwhm, kernel_size):
 
-def morphology():
-    q
+        threshold = detect_threshold(data, nsigma, background, bkg_error, mask, sigma_clip)
 
-def photometry():
-    q
+        if smooth_data==True:
+            convolved_data = smooth_data(data, kernel_name, smooth_fwhm, kernel_size)
+            segmentation_image = detect_sources(convolved_data, threshold, npixels, connectivity, mask)
+        elif smooth_data==False:
+            segmentation_image = detect_sources(data, threshold, npixels, connectivity, mask)
+        else:
+            raise ValueError('invalid value given to "smooth_data"')
 
-def cutout():
-    q
+        return segmentation_image
 
-def img_panel:():
-    q
+    def source_deblending(self, data, segment_img, npixels, labels, nlevels, contrast, mode, connectivity, relabel, nproc, progress_bar):
 
-def significance_panel():
-    q
+        deblended_image = deblend_sources(data, segment_img, npixels, labels, nlevels, contrast, mode, connectivity, relabel, nproc, progress_bar)
+
+        return deblended_image
+
+    def morphology(self):
+        """Computes all the morphological properties available in Statmorph of all sources in the segmentation map.
+            Statmorph documentation : https://statmorph.readthedocs.io/en/latest/"""
+
+        morphology_list = statmorph.source_morphology(self.sci, self.segm_deblend, weightmap=self.wht)
+        self.morphologies = morphology_list
+        return morphology_list
+
+    def photometry(self, data, segment_img, convolved_data, error, mask, background, wcs, localbkg_width, apermask_method, kron_params, detection_cat, progress_bar):
+        
+        photometry = SourceCatalog(data, segment_img, convolved_data, error, mask, background, wcs, localbkg_width, apermask_method, kron_params, detection_cat, progress_bar)
+        self.photometry = photometry
+        return photometry
+
+    def smooth_data(self, data, kernel_name, smooth_fwhm, kernel_size):
+
+        if kernel_name == 'Gaussian':
+            smooth_sigma = smooth_fwhm * gaussian_fwhm_to_sigma
+            smooth_kernel = Gaussian2DKernel(smooth_sigma, x_size=kernel_size, y_size=kernel_size)
+        elif kernel_name == 'Tophat':
+            smooth_sigma = smooth_fwhm / np.sqrt(2)
+            smooth_kernel = Tophat2DKernel(smooth_sigma, x_size=kernel_size, y_size=kernel_size)
+        else :
+            raise ValueError('Kernel not supported: {}'.format(kernel_name))
+
+        smooth_kernel.normalize()
+        convolved_data = convolve(data, smooth_kernel)
+        self.convolved = convolved_data
+        return convolved_data       
+
+    def cutout(self, x=None, y=None, width=None, height=None, xmin=None, xmax=None, ymin=None, ymax=None, extensions=['sci', 'err', 'wht', 'bkg', 'bkg_rms'], img_name='cutout_image'):
+        """Returns an image cutout"""
+
+        if xmin is not None and xmax is not None and ymin is not None and ymax is not None:
+            width = xmax - xmin
+            height = ymax - ymin
+        elif x is not None and y is not None and width is not None and height is not None:
+            xmin = x - width // 2
+            xmax = x + width // 2
+            ymin = y - height // 2
+            ymax = y + height // 2
+        else:
+            raise ValueError("Invalid arguments provided")
+
+        if 'err' in extensions: 
+            err = np.zeros((width, height))
+        if 'sci' in extensions: 
+            data = np.zeros((width, height))
+        if 'wht' in extensions: 
+            wht = np.zeros((width, height))
+        if 'bkg' in extensions: 
+            bkg = np.zeros((width, height))
+        if 'bkg_rms' in extensions: 
+            bkg_rms = np.zeros((width, height))
+
+        xmin = int(np.round(xmin, 0))
+        ymin = int(np.round(ymin, 0))
+
+        xstart = 0
+        ystart = 0
+        xend = width
+        yend = height
+
+        if xmin < 0:
+            xstart = -xmin
+            xmin = 0
+            print('Cutout xmin below 0')
+        if ymin < 0:
+            ystart = -ymin
+            ymin = 0
+            print('Cutout ymin below 0')
+        if xmax > self.sci.shape[0]:
+            xend -= xmax - self.sci.shape[0]
+            xmax = self.sci.shape[0]
+            print('Cutout xmax above image boundary')
+        if ymax > self.sci.shape[1]:
+            yend -= ymax - self.sci.shape[1]
+            ymax = self.sci.shape[1]
+            print('Cutout ymax above image boundary')
+
+        data[xstart:xend, ystart:yend] = self.sci[xmin:xmax, ymin:ymax]
+        if 'err' in extensions: 
+            err[xstart:xend, ystart:yend] = self.err[xmin:xmax, ymin:ymax]
+        if 'wht' in extensions: 
+            wht[xstart:xend, ystart:yend] = self.wht[xmin:xmax, ymin:ymax]
+        if 'bkg' in extensions: 
+            bkg[xstart:xend, ystart:yend] = self.bkg[xmin:xmax, ymin:ymax]
+        if 'bkg_rms' in extensions: 
+            bkg_rms[xstart:xend, ystart:yend] = self.bkg_rms[xmin:xmax, ymin:ymax]
+
+        return ImageFromArrays(data, img_name, err=err, wht=wht, bkg=bkg, bkg_rms=bkg_rms)
+
+    def img_panel(self, ax, im, vmin=None, vmax=None, scaling=False, cmap=cm.magma):
+        """Returns an image representation"""
+        
+        if vmin is None:
+            vmin = np.min(im)
+        if vmax is None:
+            vmax = np.max(im)
+
+        if scaling:
+            im = scaling(im)
+
+        ax.axis('off')
+        ax.imshow(im, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower')  # choose better scaling
+        
+        return ax
+    
+    def significance_panel(self, ax, threshold = 2.5, background_substracted = True):
+        """Returns a pixel significance plot"""
+        
+        if background_substracted is True:
+            sig = (self.sci)/self.err
+            
+        if background_substracted is False:
+            sig = (self.sci-self.bkg)/self.bkg_rms
+
+        ax.imshow(sig, cmap = cm.Greys, vmin = -threshold*2, vmax = threshold*2, origin = 'lower', interpolation = 'none')
+        ax.imshow(np.ma.masked_where(sig <= threshold, sig), cmap = cm.plasma, vmin = threshold, vmax = 100, origin = 'lower', interpolation = 'none')
+        ax.set_axis_off()
+
+        return ax
 
 #------------------------------------------------------------------------------
 # Image initializing
