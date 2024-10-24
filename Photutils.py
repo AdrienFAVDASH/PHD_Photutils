@@ -31,7 +31,7 @@ def process_image_morphology(image, morph_properties, nsigma, npixels, nlevels, 
     
     Parameters :
     - image : image object obtained using the image initializing classes
-    - morph_properties : list of desired morphological properties (available properties : asymmetry, concentration, deviation, doublesersic_aic, doublesersic_amplitude1, doublesersic_amplitude2, doublesersic_bic, doublesersic_chi2_dof, doublesersic_ellip1, doublesersic_ellip2, doublesersic_n1, doublesersic_n2, doublesersic_rhalf1, doublesersic_rhalf2, doublesersic_theta1, doublesersic_theta2, doublesersic_xc, doublesersic_yc, ellipticity_asymmetry, ellipticity_centroid, flag, flag_sersic, flux_circ, flux_ellip, gini, gini_m20_bulge, gini_m20_merger, intensity, m20, multimode, nx_stamp, ny_stamp, orientation_asymmetry, orientation_centroid, outer_asymmetry, r20, r50, r80, rhalf_circ, rhalf_ellip, rmax_circ, rmax_ellip, rms_asymmetry2, rpetro_circ, rpetro_ellip, sersic_aic, sersic_amplitude, sersic_bic, sersic_chi2_dof, sersic_ellip, sersic_n, sersic_rhalf, sersic_theta, sersic_xc, sersic_yc, shape_asymmetry, sky_mean, sky_median, sky_sigma, smoothness, sn_per_pixel, xc_asymmetry, xc_centroid, xmax_stamp, xmin_stamp, yc_asymmetry, yc_centroid, ymax_stamp, ymin_stamp. Default : flag, concentration, asymmetry, smoothness)
+    - morph_properties : list of desired morphological properties (available properties : asymmetry, concentration, deviation, doublesersic_aic, doublesersic_amplitude1, doublesersic_amplitude2, doublesersic_bic, doublesersic_chi2_dof, doublesersic_ellip1, doublesersic_ellip2, doublesersic_n1, doublesersic_n2, doublesersic_rhalf1, doublesersic_rhalf2, doublesersic_theta1, doublesersic_theta2, doublesersic_xc, doublesersic_yc, ellipticity_asymmetry, ellipticity_centroid, flag, flag_sersic, flux_circ, flux_ellip, gini, gini_m20_bulge, gini_m20_merger, intensity, m20, multimode, nx_stamp, ny_stamp, orientation_asymmetry, orientation_centroid, outer_asymmetry, r20, r50, r80, rhalf_circ, rhalf_ellip, rmax_circ, rmax_ellip, rms_asymmetry2, rpetro_circ, rpetro_ellip, sersic_aic, sersic_amplitude, sersic_bic, sersic_chi2_dof, sersic_ellip, sersic_n, sersic_rhalf, sersic_theta, sersic_xc, sersic_yc, shape_asymmetry, sky_mean, sky_median, sky_sigma, smoothness, sn_per_pixel, xc_asymmetry, xc_centroid, xmax_stamp, xmin_stamp, yc_asymmetry, yc_centroid, ymax_stamp, ymin_stamp.)
     - nsigma : threshold value in units of standard deviation for detecting sources. Sources are pixels whose values are above nsigma times the local background standard deviation
     - npixels : minimum number of connected pixels above the threshold that an object must have to be deblended
     - nlevels : number of multi-thresholding levels to use for deblending. Each source will be re-thresholded at nlevels levels spaced between its minimum and maximum values (non-inclusive)
@@ -573,7 +573,6 @@ class Image:
             err[rowstart:rowend, colstart:colend] = self.err[rowmin:rowmax, colmin:colmax]
         if self.mask is None:
             mask = None
-            print('mask none')
         else:
             mask[rowstart:rowend, colstart:colend] = self.mask[rowmin:rowmax, colmin:colmax].astype(bool)
 
@@ -613,6 +612,13 @@ class ImageFromFITS(Image):
     def __init__(self, img_file, img_name, idata={'sci_bkgsub': 1, 'bkg_sub': 2, 'bkg_err': 3, 'wht': 4, 'gain': 5, 'err_tot': 6}, mask=None, mask_edge_thickness=10):
         """
         Generates an instance of image class from a FITS file.
+        
+        sci_bkgsub : background subtracted science data
+        bkg_sub : subtracted background
+        bkg_err : background error map
+        wht : weight map
+        gain : gain map
+        err_tot : total error map
         """
 
         self.hdu = fits.open(img_file)
@@ -626,13 +632,14 @@ class ImageFromFITS(Image):
         self.err = self.hdu[idata['err_tot']].data if 'err_tot' in idata else None
         self.mask = mask
 
-        if self.wht is not None:
-            if self.bkg_err is None:
-                self.bkg_err = 1 / np.sqrt(self.wht)
-            if self.err is None:
-                self.err = 1 / np.sqrt(self.wht)
+        if self.wht is not None and self.err is None:
+            self.err = 1 / np.sqrt(self.wht)
+        elif self.wht is None and self.err is not None:
+            self.wht = (1/self.err)**2
+        elif self.wht is None and self.err is None:
+            raise ValueError('Image must have an error map or weight map')
 
-        if self.mask is None:
+        if self.mask is None and self.err is not None:
             self.mask = np.isnan(self.err)
             self.mask = ndimage.binary_dilation(self.mask, iterations=mask_edge_thickness)
      
@@ -641,6 +648,13 @@ class ImageFromArrays(Image):
     def __init__(self, data_bkgsub, img_name, bkg_sub = None, bkg_err = None, wht = None, gain = None, err_tot = None, mask = None, mask_edge_thickness=10):
         """
         Generates an instance of image class from different arrays.
+                
+        data_bkgsub : background subtracted science data
+        bkg_sub : subtracted background
+        bkg_err : background error map
+        wht : weight map
+        gain : gain map
+        err_tot : total error map
         """
 
         self.img_name = img_name        
@@ -652,11 +666,12 @@ class ImageFromArrays(Image):
         self.err = err_tot
         self.mask = mask
         
-        if self.wht is not None:
-            if self.bkg_err is None:
-                self.bkg_err = 1 / np.sqrt(self.wht)
-            if self.err is None:
-                self.err = 1 / np.sqrt(self.wht)
+        if self.wht is not None and self.err is None:
+            self.err = 1 / np.sqrt(self.wht)
+        elif self.wht is None and self.err is not None:
+            self.wht = (1/self.err)**2
+        elif self.wht is None and self.err is None:
+            raise ValueError('Image must have an error map or weight map')
                 
         if self.mask is None:
             self.mask = np.isnan(self.err)
@@ -667,6 +682,13 @@ class ImageFromDifferentSources(Image):
     def __init__(self, data_bkgsub_file, img_name, bkgsub_file = None, bkgerr_file = None, wht_file = None, gain_file = None, errtot_file = None, mask = None, mask_edge_thickness=10):
         """
         Generates an instance of image class from different files.
+                
+        data_bkgsub_file : background subtracted science data
+        bkgsub_file : subtracted background
+        bkgerr_file : background error map
+        wht_file : weight map
+        gain_file : gain map
+        errtot_file : total error map
         """
         
         self.img_name = img_name
@@ -678,11 +700,12 @@ class ImageFromDifferentSources(Image):
         self.err = fits.open(errtot_file)[0].data if errtot_file else None
         self.mask = mask
         
-        if self.wht is not None:
-            if self.bkg_err is None:
-                self.bkg_err = 1 / np.sqrt(self.wht)
-            if self.err is None:
-                self.err = 1 / np.sqrt(self.wht)
+        if self.wht is not None and self.err is None:
+            self.err = 1 / np.sqrt(self.wht)
+        elif self.wht is None and self.err is not None:
+            self.wht = (1/self.err)**2
+        elif self.wht is None and self.err is None:
+            raise ValueError('Image must have an error map or weight map')
                 
         if self.mask is None:
             self.mask = np.isnan(self.err)
